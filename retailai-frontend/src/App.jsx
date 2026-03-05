@@ -3,6 +3,7 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, LineCh
 import { translations, RTL_LANGUAGES, LANGUAGE_LIST } from "./translations";
 import { apiUrl } from "./api";
 import AddProduct from "./components/AddProduct";
+import StockManager from "./components/StockManager";
 
 // ── LANGUAGE CONTEXT ──────────────────────────────────────────
 const LangCtx = createContext();
@@ -608,7 +609,13 @@ function AppContent() {
 
   const ALERTS_COUNT = allProducts.filter(p => p.status === "CRITICAL" || p.status === "LOW").length;
 
-  const tabs = [{ id: "home", icon: "🏠", label: t.home }, { id: "products", icon: "📦", label: t.products }, { id: "sales", icon: "📊", label: t.sales }, { id: "alerts", icon: "✅", label: t.todo, badge: ALERTS_COUNT }];
+  const tabs = [
+    { id: "home", icon: "🏠", label: t.home },
+    { id: "stock", icon: "🛒", label: t.stock },
+    { id: "products", icon: "📦", label: t.products },
+    { id: "sales", icon: "📊", label: t.sales },
+    { id: "alerts", icon: "✅", label: t.todo, badge: ALERTS_COUNT }
+  ];
   const handleNav = (id) => { vibrate(); setTab(id); };
   const handleFilter = (f) => { vibrate(); setProdFilter(f); setTab("products"); };
 
@@ -622,6 +629,7 @@ function AppContent() {
       <InstallBanner />
       <div style={{ padding: "0 16px 16px", maxWidth: 500, margin: "0 auto", animation: "fadeIn 0.3s ease" }}>
         {tab === "home" && <HomeScreen onNav={handleNav} onFilter={handleFilter} products={allProducts} />}
+        {tab === "stock" && <StockManager />}
         {tab === "products" && <ProductsScreen initialFilter={prodFilter} onAdd={() => setShowAddProduct(true)} products={allProducts} />}
         {tab === "sales" && <SalesScreen products={allProducts} />}
         {tab === "alerts" && <TodoScreen products={allProducts} />}

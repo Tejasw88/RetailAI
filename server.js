@@ -1,24 +1,161 @@
-// RetailAI — Node.js API connected to Neon PostgreSQL
-// npm install express cors pg dotenv
-// node server.js
-
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const { Pool } = require("pg");
+const { drizzle } = require("drizzle-orm/node-postgres");
+const schemas = require("./db/schema");
 
 const app = express();
+const PORT = process.env.PORT || 3001;
+
+// Database setup
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+
+const db = drizzle(pool, { schema: schemas });
 app.use(cors());
 app.use(express.json());
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
+// --- New Barcode & Stock Module (Drizzle) ---
+
+// 1. Scan Barcode (Check DB or OpenFoodFacts)
+app.post("/api/scan", async (req, res) => {
+  const { barcode } = req.body;
+  if (!barcode) return res.status(400).json({ error: "Barcode is required" });
+
+  try {
+    // Check local database first
+    const existing = await db.query.barcodeProducts.findFirst({
+      where: (products, { eq }) => eq(products.barcode, barcode),
+    });
+
+    if (existing) {
+      return res.json({ source: "db", product: existing });
+    }
+
+    // If not in DB, check OpenFoodFacts
+    const offUrl = `https://world.openfoodfacts.org/api/v2/product/${barcode}.json`;
+    const response = await fetch(offUrl);
+    const data = await response.json();
+
+    if (data.status === 1) {
+      const p = data.product;
+      return res.json({
+        source: "api",
+        product: {
+          barcode,
+          productName: p.product_name || "",
+          brand: p.brands || "",
+          category: p.categories ? p.categories.split(",")[0] : "",
+        }
+      });
+    }
+
+    return res.json({ source: "not_found", barcode });
+  } catch (err) {
+    console.error("Scan error:", err);
+    res.status(500).json({ error: "Failed to scan barcode" });
+  }
 });
 
+// 2. Add/Update Product in Stock
+app.post("/api/add-product", async (req, res) => {
+  const { barcode, productName, brand, category, sellingPrice, mrp, quantity, gstPercent } = req.body;
+
+  try {
+    const updated = await db.insert(schemas.barcodeProducts).values({
+      barcode,
+      productName,
+      brand,
+      category,
+      sellingPrice: sellingPrice.toString(),
+      mrp: mrp ? mrp.toString() : null,
+      quantity: parseInt(quantity) || 0,
+      gstPercent: gstPercent ? gstPercent.toString() : null,
+      updatedAt: new Date(),
+    })
+      .onConflictDoUpdate({
+        target: schemas.barcodeProducts.barcode,
+        set: {
+          productName,
+          brand,
+          category,
+          sellingPrice: sellingPrice.toString(),
+          mrp: mrp ? mrp.toString() : null,
+          quantity: sql`${schemas.barcodeProducts.quantity} + ${parseInt(quantity) || 0}`,
+          gstPercent: gstPercent ? gstPercent.toString() : null,
+          updatedAt: new Date(),
+        }
+      })
+      .returning();
+
+    res.json({ message: "Product updated in stock", product: updated[0] });
+  } catch (err) {
+    console.error("Add product error:", err);
+    res.status(500).json({ error: "Failed to update stock" });
+  }
+});
+
+// 3. List all products (Barcode Module)
+app.get("/api/barcode-products", async (req, res) => {
+  try {
+    const all = await db.query.barcodeProducts.findMany({
+      orderBy: (products, { desc }) => [desc(products.updatedAt)],
+    });
+    res.json(all);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch products" });
+  }
+});
+
+// 4. Update Product
+app.put("/api/barcode-products/:id", async (req, res) => {
+  const { id } = req.params;
+  const { productName, brand, category, sellingPrice, mrp, quantity, gstPercent } = req.body;
+
+  try {
+    const updated = await db.update(schemas.barcodeProducts)
+      .set({
+        productName,
+        brand,
+        category,
+        sellingPrice: sellingPrice.toString(),
+        mrp: mrp ? mrp.toString() : null,
+        quantity: parseInt(quantity) || 0,
+        gstPercent: gstPercent ? gstPercent.toString() : null,
+        updatedAt: new Date(),
+      })
+      .where(sql`${schemas.barcodeProducts.id} = ${id}`)
+      .returning();
+
+    if (updated.length === 0) return res.status(404).json({ error: "Product not found" });
+    res.json(updated[0]);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to update product" });
+  }
+});
+
+// 5. Delete Product
+app.delete("/api/barcode-products/:id", async (req, res) => {
+  const { id } = req.params;
+  try {
+    const deleted = await db.delete(schemas.barcodeProducts)
+      .where(sql`${schemas.barcodeProducts.id} = ${id}`)
+      .returning();
+
+    if (deleted.length === 0) return res.status(404).json({ error: "Product not found" });
+    res.json({ message: "Product deleted" });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to delete product" });
+  }
+});
+
+// Existing DB initialization (already handles pool)
 pool.connect()
   .then(async () => {
-    console.log("✅ Connected to Neon PostgreSQL");
+    console.log("✅ Connected to Neon PostgreSQL (Shared Pool)");
     // Migration: add new columns if they don't exist
     await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS barcode VARCHAR(50)`);
     await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS brand VARCHAR(100)`);
@@ -289,5 +426,4 @@ app.patch("/api/inventory/:productId/restock", async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => console.log(`🚀 RetailAI API running → http://localhost:${PORT}`));
