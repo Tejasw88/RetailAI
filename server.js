@@ -17,7 +17,15 @@ const pool = new Pool({
 });
 
 pool.connect()
-  .then(() => console.log("✅ Connected to Neon PostgreSQL"))
+  .then(async () => {
+    console.log("✅ Connected to Neon PostgreSQL");
+    // Migration: add new columns if they don't exist
+    await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS barcode VARCHAR(50)`);
+    await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS brand VARCHAR(100)`);
+    await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS emoji VARCHAR(10)`);
+    await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS mrp NUMERIC(10,2)`);
+    console.log("✅ All columns ready (barcode, brand, emoji, mrp)");
+  })
   .catch(err => { console.error("❌ DB connection failed:", err.message); process.exit(1); });
 
 // ── GET /api/summary ──────────────────────────────────────────
@@ -59,31 +67,68 @@ app.get("/api/products", async (req, res) => {
     if (status) {
       const s = status.toUpperCase();
       if (s === "CRITICAL") where.push("i.current_stock <= i.safety_stock");
-      else if (s === "LOW")  where.push("i.current_stock > i.safety_stock AND i.current_stock <= i.reorder_point");
+      else if (s === "LOW") where.push("i.current_stock > i.safety_stock AND i.current_stock <= i.reorder_point");
       else if (s === "OVERSTOCK") where.push("i.current_stock > i.eoq * 2");
-      else if (s === "OPTIMAL")   where.push("i.current_stock > i.reorder_point AND i.current_stock <= i.eoq * 2");
+      else if (s === "OPTIMAL") where.push("i.current_stock > i.reorder_point AND i.current_stock <= i.eoq * 2");
     }
     const whereClause = where.length ? "WHERE " + where.join(" AND ") : "";
 
     const result = await pool.query(`
       SELECT
-        p.*,
-        i.current_stock, i.safety_stock, i.reorder_point, i.eoq, i.lead_time_days,
-        ROUND(i.current_stock::numeric / NULLIF(
+        p.id, p.name, p.category, p.unit_cost, p.selling_price, p.barcode, p.brand, p.emoji, p.mrp,
+        COALESCE(i.current_stock, 0) AS current_stock,
+        COALESCE(i.safety_stock, 0) AS safety_stock,
+        COALESCE(i.reorder_point, 0) AS reorder_point,
+        COALESCE(i.eoq, 0) AS eoq,
+        COALESCE(i.lead_time_days, 5) AS lead_time_days,
+        ROUND(COALESCE(i.current_stock, 0)::numeric / NULLIF(
           (SELECT AVG(s.units_sold) FROM sales_history s WHERE s.product_id = p.id AND s.sale_date >= CURRENT_DATE - 30),
           0), 1) AS days_of_stock,
         (SELECT ROUND(AVG(s.units_sold),1) FROM sales_history s WHERE s.product_id = p.id AND s.sale_date >= CURRENT_DATE - 30) AS avg_daily,
         CASE
+          WHEN i.current_stock IS NULL THEN 'OPTIMAL'
           WHEN i.current_stock <= i.safety_stock THEN 'CRITICAL'
           WHEN i.current_stock <= i.reorder_point THEN 'LOW'
           WHEN i.current_stock > i.eoq * 2 THEN 'OVERSTOCK'
           ELSE 'OPTIMAL'
         END AS status
       FROM products p
-      JOIN inventory i ON i.product_id = p.id
+      LEFT JOIN inventory i ON i.product_id = p.id
       ${whereClause}
       ORDER BY p.name`);
     res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── GET /api/products/search?q=term ──────────────────────────
+app.get("/api/products/search", async (req, res) => {
+  try {
+    const q = req.query.q;
+    if (!q || q.length < 2) return res.json([]);
+    const result = await pool.query(
+      `SELECT p.id, p.name, p.brand, p.category, p.emoji, p.mrp, p.barcode, p.selling_price, p.unit_cost
+       FROM products p
+       WHERE LOWER(p.name) LIKE $1 OR LOWER(p.brand) LIKE $1
+       ORDER BY p.name
+       LIMIT 10`,
+      [`%${q.toLowerCase()}%`]
+    );
+    res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── GET /api/products/barcode/:barcode ────────────────────────
+app.get("/api/products/barcode/:barcode", async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT p.*, i.current_stock, i.safety_stock, i.reorder_point, i.eoq, i.lead_time_days
+       FROM products p
+       LEFT JOIN inventory i ON i.product_id = p.id
+       WHERE p.barcode = $1 LIMIT 1`,
+      [req.params.barcode]
+    );
+    if (!result.rows.length) return res.json({ found: false });
+    res.json({ found: true, product: result.rows[0] });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -172,6 +217,75 @@ app.patch("/api/alerts/:id/resolve", async (req, res) => {
   try {
     await pool.query("UPDATE alerts SET resolved=TRUE WHERE id=$1", [req.params.id]);
     res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+
+
+// ── POST /api/products ────────────────────────────────────────
+app.post("/api/products", async (req, res) => {
+  try {
+    const { name, category, barcode, unit_cost, selling_price, initial_stock, brand, emoji, mrp } = req.body;
+    if (!name || !category || !unit_cost || !selling_price) {
+      return res.status(400).json({ error: "name, category, unit_cost, selling_price are required" });
+    }
+
+    // Auto-generate next product ID
+    const maxId = await pool.query(`SELECT id FROM products ORDER BY id DESC LIMIT 1`);
+    let nextNum = 1;
+    if (maxId.rows.length) {
+      const num = parseInt(maxId.rows[0].id.replace(/\D/g, ''));
+      nextNum = num + 1;
+    }
+    const newId = `P${String(nextNum).padStart(3, '0')}`;
+
+    // Insert product
+    await pool.query(
+      `INSERT INTO products (id, name, category, barcode, unit_cost, selling_price, brand, emoji, mrp)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      [newId, name, category, barcode || null, parseFloat(unit_cost), parseFloat(selling_price), brand || null, emoji || '📦', mrp ? parseFloat(mrp) : null]
+    );
+
+    // Auto-calculate inventory parameters
+    const stock = parseInt(initial_stock) || 0;
+    const eoq = Math.max(50, Math.round(Math.sqrt((2 * 365 * 30 * parseFloat(unit_cost)) / (parseFloat(unit_cost) * 0.25))));
+    const safety = Math.max(5, Math.round(eoq * 0.15));
+    const reorder = Math.round(safety + (30 * 5)); // avg_daily * lead_time approx
+    const leadTime = 5;
+
+    await pool.query(
+      `INSERT INTO inventory (product_id, current_stock, safety_stock, reorder_point, eoq, lead_time_days)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [newId, stock, safety, reorder, eoq, leadTime]
+    );
+
+    res.json({ success: true, id: newId, name, current_stock: stock });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── PATCH /api/inventory/:productId/restock ────────────────────
+app.patch("/api/inventory/:productId/restock", async (req, res) => {
+  try {
+    const { quantity } = req.body;
+    if (!quantity || quantity <= 0) return res.status(400).json({ error: "quantity must be > 0" });
+
+    const result = await pool.query(
+      `UPDATE inventory SET current_stock = current_stock + $1, updated_at = NOW()
+       WHERE product_id = $2
+       RETURNING current_stock`,
+      [parseInt(quantity), req.params.productId]
+    );
+    if (!result.rows.length) return res.status(404).json({ error: "Product not found" });
+
+    // Get product info for response
+    const product = await pool.query(`SELECT name FROM products WHERE id = $1`, [req.params.productId]);
+
+    res.json({
+      success: true,
+      product_id: req.params.productId,
+      name: product.rows[0]?.name,
+      new_stock: result.rows[0].current_stock
+    });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
