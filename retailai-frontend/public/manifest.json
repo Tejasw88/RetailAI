@@ -1,0 +1,30 @@
+{
+    "name": "RetailAI — Smart Shop Manager",
+    "short_name": "RetailAI",
+    "description": "AI-powered stock management for kirana stores",
+    "start_url": "/",
+    "display": "standalone",
+    "orientation": "portrait",
+    "background_color": "#FFFBF5",
+    "theme_color": "#2563eb",
+    "icons": [
+        {
+            "src": "/icon-192.png",
+            "sizes": "192x192",
+            "type": "image/png",
+            "purpose": "any maskable"
+        },
+        {
+            "src": "/icon-512.png",
+            "sizes": "512x512",
+            "type": "image/png",
+            "purpose": "any maskable"
+        }
+    ],
+    "categories": [
+        "business",
+        "productivity"
+    ],
+    "lang": "en-IN",
+    "dir": "ltr"
+}
