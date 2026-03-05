@@ -57,7 +57,17 @@ app.post("/api/scan", async (req, res) => {
       });
     }
 
-    return res.json({ source: "not_found", barcode });
+    // Auto-save new barcode as placeholder so next scan finds it
+    const maxId2 = await pool.query(`SELECT id FROM products ORDER BY id DESC LIMIT 1`);
+    let nn = 1;
+    if (maxId2.rows.length) { const n2 = parseInt(maxId2.rows[0].id.replace(/\D/g, '')); if (!isNaN(n2)) nn = n2 + 1; }
+    const autoId = `P${String(nn).padStart(3, '0')}`;
+    await pool.query(
+      `INSERT INTO products(id, name, category, barcode, unit_cost, selling_price, emoji) VALUES($1, $2, $3, $4, 0, 0, '📦')`,
+      [autoId, `New Product (${barcode})`, 'Other', barcode]
+    );
+    await pool.query(`INSERT INTO inventory(product_id, current_stock, safety_stock, reorder_point, eoq, lead_time_days) VALUES($1, 0, 5, 10, 50, 5)`, [autoId]);
+    return res.json({ source: "new", product: { id: autoId, barcode, productName: `New Product (${barcode})`, brand: '', category: 'Other', sellingPrice: 0, mrp: 0, quantity: 0 } });
   } catch (err) {
     console.error("Scan error:", err);
     res.status(500).json({ error: "Failed to scan barcode" });
@@ -109,16 +119,15 @@ app.post("/api/add-product", async (req, res) => {
   }
 });
 
-// 3. List recently updated barcode products
+// 3. List recently updated products (all products)
 app.get("/api/barcode-products", async (req, res) => {
   try {
     const result = await pool.query(`
-      SELECT p.id, p.name AS "productName", p.brand, p.category, p.selling_price AS "sellingPrice", p.mrp, p.barcode, COALESCE(i.current_stock, 0) AS quantity
+      SELECT p.id, p.name AS "productName", p.brand, p.category, p.selling_price AS "sellingPrice", p.mrp, p.barcode, p.emoji, COALESCE(i.current_stock, 0) AS quantity
       FROM products p
       LEFT JOIN inventory i ON i.product_id = p.id
-      WHERE p.barcode IS NOT NULL
       ORDER BY i.updated_at DESC NULLS LAST
-      LIMIT 20
+      LIMIT 50
     `);
     res.json(result.rows);
   } catch (err) {
@@ -349,7 +358,7 @@ app.post("/api/products", async (req, res) => {
       const num = parseInt(maxId.rows[0].id.replace(/\D/g, ''));
       nextNum = num + 1;
     }
-    const newId = `P${String(nextNum).padStart(3, '0')} `;
+    const newId = `P${String(nextNum).padStart(3, '0')}`;
 
     // Insert product
     await pool.query(
@@ -399,6 +408,58 @@ app.patch("/api/inventory/:productId/restock", async (req, res) => {
       new_stock: result.rows[0].current_stock
     });
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── POST /api/upload-products (bulk import) ──────────────────
+app.post("/api/upload-products", async (req, res) => {
+  try {
+    const { products: items } = req.body;
+    if (!items || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: "products array is required" });
+    }
+
+    let imported = 0, updated = 0;
+    for (const item of items) {
+      const barcode = item.barcode?.toString().trim();
+      const name = item.product_name || item.name || item.productName || '';
+      const price = parseFloat(item.price || item.sellingPrice || item.selling_price || 0);
+      const mrp = parseFloat(item.mrp || price);
+      const brand = item.brand || '';
+      const category = item.category || 'Other';
+      if (!barcode || !name) continue;
+
+      const existing = await pool.query(`SELECT id FROM products WHERE barcode = $1`, [barcode]);
+      if (existing.rows.length > 0) {
+        await pool.query(
+          `UPDATE products SET name = $1, selling_price = $2, mrp = $3, brand = COALESCE(NULLIF($4, ''), brand), category = COALESCE(NULLIF($5, 'Other'), category) WHERE barcode = $6`,
+          [name, price, mrp, brand, category, barcode]
+        );
+        updated++;
+      } else {
+        const maxId = await pool.query(`SELECT id FROM products ORDER BY id DESC LIMIT 1`);
+        let nextNum = 1;
+        if (maxId.rows.length) {
+          const num = parseInt(maxId.rows[0].id.replace(/\D/g, ''));
+          if (!isNaN(num)) nextNum = num + 1;
+        }
+        const newId = `P${String(nextNum).padStart(3, '0')}`;
+        const unitCost = Math.round(price * 0.7);
+        await pool.query(
+          `INSERT INTO products(id, name, category, barcode, unit_cost, selling_price, brand, emoji, mrp) VALUES($1, $2, $3, $4, $5, $6, $7, '📦', $8)`,
+          [newId, name, category, barcode, unitCost, price, brand, mrp]
+        );
+        await pool.query(
+          `INSERT INTO inventory(product_id, current_stock, safety_stock, reorder_point, eoq, lead_time_days) VALUES($1, 0, 5, 10, 50, 5)`,
+          [newId]
+        );
+        imported++;
+      }
+    }
+    res.json({ success: true, imported, updated, total: items.length });
+  } catch (err) {
+    console.error("Bulk upload error:", err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.listen(PORT, () => console.log(`🚀 RetailAI API running → http://localhost:${PORT}`));

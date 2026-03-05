@@ -54,14 +54,6 @@ async function fetchProductsFromAPI() {
 }
 
 const DAYS_EN = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const SALES_DATA = [
-  { day: "Mon", units: 98, revenue: 12500 }, { day: "Tue", units: 112, revenue: 14200 }, { day: "Wed", units: 142, revenue: 18400 },
-  { day: "Thu", units: 89, revenue: 11300 }, { day: "Fri", units: 134, revenue: 17100 }, { day: "Sat", units: 156, revenue: 19800 }, { day: "Sun", units: 116, revenue: 14700 },
-];
-const avgUnits = Math.round(SALES_DATA.reduce((s, d) => s + d.units, 0) / 7);
-const totalUnits = SALES_DATA.reduce((s, d) => s + d.units, 0);
-const totalRev = SALES_DATA.reduce((s, d) => s + d.revenue, 0);
-const bestDay = SALES_DATA.reduce((b, d) => d.units > b.units ? d : b, SALES_DATA[0]);
 
 // ── HELPERS ───────────────────────────────────────────────────
 function getGreeting(t) { const h = new Date().getHours(); return h < 12 ? t.goodMorning : h < 17 ? t.goodAfternoon : t.goodEvening; }

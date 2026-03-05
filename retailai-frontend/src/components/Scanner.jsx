@@ -21,7 +21,7 @@ const Scanner = ({ onScanSuccess, onScanError }) => {
     }, []);
 
     return (
-        <div className="bg-white p-4 rounded-xl shadow-lg">
+        <div style={{ background: "#fff", padding: 16, borderRadius: 16, boxShadow: "0 4px 20px rgba(0,0,0,0.1)" }}>
             <div id="reader"></div>
         </div>
     );
