@@ -35,7 +35,7 @@ const StockManager = () => {
     };
 
     const handleScanSuccess = async (decodedText) => {
-        setMessage({ type: "info", text: "Scanning barcode..." });
+        setMessage({ type: "info", text: "Looking up barcode..." });
         setShowScanner(false);
         setLoading(true);
 
@@ -50,7 +50,7 @@ const StockManager = () => {
             if (data.source === "db" || data.source === "api") {
                 setEditingProduct({
                     ...editingProduct,
-                    barcode: data.product.barcode,
+                    barcode: data.product.barcode || decodedText,
                     productName: data.product.productName || data.product.name || "",
                     brand: data.product.brand || "",
                     category: data.product.category || "",
@@ -59,14 +59,14 @@ const StockManager = () => {
                 });
                 setMessage({
                     type: "success",
-                    text: data.source === "db" ? "Product found in database!" : "Product found on OpenFoodFacts!",
+                    text: data.source === "db" ? `Found in database: ${data.product.productName || data.product.name}` : "Product found globally, fetched details!",
                 });
             } else {
                 setEditingProduct({ ...editingProduct, barcode: decodedText });
-                setMessage({ type: "warning", text: "Product not found. Please enter details manually." });
+                setMessage({ type: "warning", text: "New barcode detected. Please enter details manually." });
             }
         } catch (err) {
-            setMessage({ type: "error", text: "Error during scan lookup." });
+            setMessage({ type: "error", text: "Error during network request." });
         } finally {
             setLoading(false);
         }
@@ -84,8 +84,18 @@ const StockManager = () => {
             const data = await response.json();
             setMessage({ type: "success", text: "Successfully added to stock!" });
             fetchRecentProducts();
-            // Reset form partly
-            setEditingProduct({ ...editingProduct, barcode: "", productName: "", quantity: "1" });
+
+            // Keep barcode so they can see what was added, but reset quantity and name for the next scan
+            // Actually, best to reset barcode so they know it's ready for next
+            setEditingProduct({
+                ...editingProduct,
+                barcode: "",
+                productName: "",
+                quantity: "1"
+            });
+
+            // Clear message after 3 seconds
+            setTimeout(() => setMessage({ type: "", text: "" }), 3000);
         } catch (err) {
             setMessage({ type: "error", text: "Failed to add product to stock." });
         } finally {
@@ -93,133 +103,144 @@ const StockManager = () => {
         }
     };
 
+    const msgStyles = {
+        success: { bg: "#ecfdf5", color: "#065f46", border: "#a7f3d0" },
+        warning: { bg: "#fffbeb", color: "#92400e", border: "#fde68a" },
+        info: { bg: "#eff6ff", color: "#1e40af", border: "#bfdbfe" },
+        error: { bg: "#fef2f2", color: "#b91c1c", border: "#fecaca" }
+    };
+
+    const currentMsgStyle = message.type ? msgStyles[message.type] : null;
+
     return (
-        <div className="max-w-6xl mx-auto p-6 space-y-8 animate-in fade-in duration-500">
-            <div className="flex justify-between items-center">
+        <div style={{ paddingBottom: 24 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
                 <div>
-                    <h1 className="text-3xl font-bold text-slate-800">Stock Management</h1>
-                    <p className="text-slate-500">Scan barcodes to update inventory in real-time</p>
+                    <h2 style={{ fontSize: 24, fontWeight: 800, margin: 0, color: "var(--text)" }}>Stock Manager</h2>
+                    <p style={{ fontSize: 13, color: "#666", marginTop: 4 }}>Scan barcodes to update inventory</p>
                 </div>
                 <button
                     onClick={() => setShowScanner(!showScanner)}
-                    className={`px-6 py-3 rounded-full font-semibold transition-all shadow-lg active:scale-95 ${showScanner ? "bg-red-500 text-white" : "bg-indigo-600 text-white hover:bg-indigo-700"
-                        }`}
+                    style={{
+                        padding: "10px 16px",
+                        borderRadius: 12,
+                        border: "none",
+                        background: showScanner ? "#ef4444" : "#2563eb",
+                        color: "#fff",
+                        fontWeight: 700,
+                        boxShadow: showScanner ? "0 4px 12px rgba(239, 68, 68, 0.3)" : "0 4px 12px rgba(37,99,235,0.3)",
+                        cursor: "pointer",
+                        transition: "all 0.2s"
+                    }}
                 >
-                    {showScanner ? "Close Scanner" : "Open Barcode Scanner"}
+                    {showScanner ? "Close Scanner" : "Scan Barcode"}
                 </button>
             </div>
 
             {showScanner && (
-                <div className="flex justify-center">
-                    <div className="w-full max-w-md">
-                        <Scanner onScanSuccess={handleScanSuccess} onScanError={(err) => console.log(err)} />
-                    </div>
+                <div style={{ background: "#000", borderRadius: 16, overflow: "hidden", marginBottom: 20, boxShadow: "0 4px 20px rgba(0,0,0,0.15)" }}>
+                    <Scanner onScanSuccess={handleScanSuccess} onScanError={(err) => console.log(err)} />
                 </div>
             )}
 
             {message.text && (
-                <div
-                    className={`p-4 rounded-xl border ${message.type === "success" ? "bg-emerald-50 border-emerald-200 text-emerald-800" :
-                        message.type === "warning" ? "bg-amber-50 border-amber-200 text-amber-800" :
-                            message.type === "info" ? "bg-blue-50 border-blue-200 text-blue-800" :
-                                "bg-rose-50 border-rose-200 text-rose-800"
-                        } animate-in slide-in-from-top-2 duration-300`}
-                >
+                <div style={{
+                    padding: "12px 16px",
+                    borderRadius: 12,
+                    background: currentMsgStyle.bg,
+                    color: currentMsgStyle.color,
+                    border: `1px solid ${currentMsgStyle.border}`,
+                    marginBottom: 20,
+                    fontWeight: 600,
+                    fontSize: 14,
+                    animation: "fadeIn 0.3s ease"
+                }}>
                     {message.text}
                 </div>
             )}
 
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
                 {/* Entry Form */}
-                <div className="bg-white p-8 rounded-2xl shadow-xl border border-slate-100">
-                    <h2 className="text-xl font-semibold mb-6 text-slate-700">Product Details</h2>
-                    <form onSubmit={handleAddProduct} className="space-y-4">
-                        <div className="grid grid-cols-2 gap-4">
-                            <div className="space-y-1">
-                                <label className="text-sm font-medium text-slate-600">Barcode</label>
+                <div style={{ background: "#fff", padding: 20, borderRadius: 16, boxShadow: "0 2px 12px rgba(0,0,0,0.06)" }}>
+                    <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 16, color: "var(--text)" }}>Add / Update Product</h3>
+
+                    <form onSubmit={handleAddProduct} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                        <div style={{ display: "flex", gap: 12 }}>
+                            <div style={{ flex: 2 }}>
+                                <label style={labelStyle}>Barcode</label>
                                 <input
                                     type="text"
                                     required
                                     value={editingProduct.barcode}
                                     onChange={(e) => setEditingProduct({ ...editingProduct, barcode: e.target.value })}
-                                    className="w-full px-4 py-2 rounded-lg border border-slate-200 focus:ring-2 focus:ring-indigo-500 transition-all outline-none"
-                                    placeholder="Scan or enter barcode"
+                                    style={inputStyle}
+                                    placeholder="Enter or scan"
                                 />
                             </div>
-                            <div className="space-y-1">
-                                <label className="text-sm font-medium text-slate-600">Quantity to Add</label>
+                            <div style={{ flex: 1 }}>
+                                <label style={labelStyle}>Qty</label>
                                 <input
                                     type="number"
                                     required
                                     value={editingProduct.quantity}
                                     onChange={(e) => setEditingProduct({ ...editingProduct, quantity: e.target.value })}
-                                    className="w-full px-4 py-2 rounded-lg border border-slate-200 focus:ring-2 focus:ring-indigo-500 transition-all outline-none"
+                                    style={inputStyle}
+                                    min="1"
                                 />
                             </div>
                         </div>
 
-                        <div className="space-y-1">
-                            <label className="text-sm font-medium text-slate-600">Product Name</label>
+                        <div>
+                            <label style={labelStyle}>Product Name</label>
                             <input
                                 type="text"
                                 required
                                 value={editingProduct.productName}
                                 onChange={(e) => setEditingProduct({ ...editingProduct, productName: e.target.value })}
-                                className="w-full px-4 py-2 rounded-lg border border-slate-200 focus:ring-2 focus:ring-indigo-500 transition-all outline-none"
-                                placeholder="Name"
+                                style={inputStyle}
+                                placeholder="E.g., Parle-G 250g"
                             />
                         </div>
 
-                        <div className="grid grid-cols-2 gap-4">
-                            <div className="space-y-1">
-                                <label className="text-sm font-medium text-slate-600">Brand</label>
+                        <div style={{ display: "flex", gap: 12 }}>
+                            <div style={{ flex: 1 }}>
+                                <label style={labelStyle}>Brand</label>
                                 <input
                                     type="text"
                                     value={editingProduct.brand}
                                     onChange={(e) => setEditingProduct({ ...editingProduct, brand: e.target.value })}
-                                    className="w-full px-4 py-2 rounded-lg border border-slate-200 focus:ring-2 focus:ring-indigo-500 transition-all outline-none"
-                                    placeholder="Brand"
+                                    style={inputStyle}
                                 />
                             </div>
-                            <div className="space-y-1">
-                                <label className="text-sm font-medium text-slate-600">Category</label>
+                            <div style={{ flex: 1 }}>
+                                <label style={labelStyle}>Category</label>
                                 <input
                                     type="text"
                                     value={editingProduct.category}
                                     onChange={(e) => setEditingProduct({ ...editingProduct, category: e.target.value })}
-                                    className="w-full px-4 py-2 rounded-lg border border-slate-200 focus:ring-2 focus:ring-indigo-500 transition-all outline-none"
-                                    placeholder="Category"
+                                    style={inputStyle}
                                 />
                             </div>
                         </div>
 
-                        <div className="grid grid-cols-3 gap-4">
-                            <div className="space-y-1">
-                                <label className="text-sm font-medium text-slate-600">Selling Price (₹)</label>
+                        <div style={{ display: "flex", gap: 12 }}>
+                            <div style={{ flex: 1 }}>
+                                <label style={labelStyle}>Price (₹)</label>
                                 <input
                                     type="number"
                                     required
                                     value={editingProduct.sellingPrice}
                                     onChange={(e) => setEditingProduct({ ...editingProduct, sellingPrice: e.target.value })}
-                                    className="w-full px-4 py-2 rounded-lg border border-slate-200 focus:ring-2 focus:ring-indigo-500 transition-all outline-none"
+                                    style={inputStyle}
                                 />
                             </div>
-                            <div className="space-y-1">
-                                <label className="text-sm font-medium text-slate-600">MRP (₹)</label>
+                            <div style={{ flex: 1 }}>
+                                <label style={labelStyle}>MRP (₹)</label>
                                 <input
                                     type="number"
                                     value={editingProduct.mrp}
                                     onChange={(e) => setEditingProduct({ ...editingProduct, mrp: e.target.value })}
-                                    className="w-full px-4 py-2 rounded-lg border border-slate-200 focus:ring-2 focus:ring-indigo-500 transition-all outline-none"
-                                />
-                            </div>
-                            <div className="space-y-1">
-                                <label className="text-sm font-medium text-slate-600">GST (%)</label>
-                                <input
-                                    type="number"
-                                    value={editingProduct.gstPercent}
-                                    onChange={(e) => setEditingProduct({ ...editingProduct, gstPercent: e.target.value })}
-                                    className="w-full px-4 py-2 rounded-lg border border-slate-200 focus:ring-2 focus:ring-indigo-500 transition-all outline-none"
+                                    style={inputStyle}
                                 />
                             </div>
                         </div>
@@ -227,34 +248,51 @@ const StockManager = () => {
                         <button
                             type="submit"
                             disabled={loading}
-                            className={`w-full py-4 rounded-xl font-bold text-lg shadow-lg active:scale-95 transition-all mt-4 ${loading ? "bg-slate-300 cursor-not-allowed" : "bg-indigo-600 text-white hover:bg-indigo-700"
-                                }`}
+                            style={{
+                                width: "100%",
+                                padding: "16px",
+                                borderRadius: 14,
+                                border: "none",
+                                background: loading ? "#94a3b8" : "#2563eb",
+                                color: "#fff",
+                                fontWeight: 800,
+                                fontSize: 16,
+                                marginTop: 8,
+                                cursor: loading ? "not-allowed" : "pointer",
+                                boxShadow: loading ? "none" : "0 4px 14px rgba(37,99,235,0.4)"
+                            }}
                         >
-                            {loading ? "Processing..." : "Add to Stock / Update"}
+                            {loading ? "Saving..." : "Add to Inventory"}
                         </button>
                     </form>
                 </div>
 
                 {/* Recent Updates List */}
-                <div className="bg-slate-50 p-8 rounded-2xl border border-slate-200">
-                    <h2 className="text-xl font-semibold mb-6 text-slate-700">Recently Updated</h2>
+                <div style={{ background: "#fff", padding: 20, borderRadius: 16, boxShadow: "0 2px 12px rgba(0,0,0,0.06)" }}>
+                    <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 16, color: "var(--text)" }}>Recently Scanned</h3>
                     {recentProducts.length === 0 ? (
-                        <p className="text-slate-400 italic">No products added yet.</p>
+                        <div style={{ textAlign: "center", padding: "20px 0", color: "#999", fontSize: 14 }}>
+                            No items added recently.
+                        </div>
                     ) : (
-                        <div className="space-y-4 max-h-[500px] overflow-y-auto pr-2">
+                        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                             {recentProducts.map((p) => (
-                                <div key={p.id} className="bg-white p-4 rounded-xl shadow-sm border border-slate-100 flex justify-between items-center group hover:border-indigo-200 transition-colors">
-                                    <div>
-                                        <h3 className="font-bold text-slate-800">{p.productName}</h3>
-                                        <div className="flex gap-2 text-xs text-slate-500">
-                                            <span>{p.brand}</span>
-                                            <span>•</span>
-                                            <span>{p.barcode}</span>
+                                <div key={p.id} style={{
+                                    display: "flex",
+                                    justifyContent: "space-between",
+                                    alignItems: "center",
+                                    paddingBottom: 12,
+                                    borderBottom: "1px solid #f1f5f9"
+                                }}>
+                                    <div style={{ flex: 1 }}>
+                                        <div style={{ fontWeight: 700, color: "#1e293b", fontSize: 15 }}>{p.productName}</div>
+                                        <div style={{ fontSize: 12, color: "#64748b", marginTop: 2 }}>
+                                            {p.barcode} • {p.category || "General"}
                                         </div>
                                     </div>
-                                    <div className="text-right">
-                                        <div className="text-indigo-600 font-bold">₹{p.sellingPrice}</div>
-                                        <div className="text-xs text-slate-400">Qty: {p.quantity}</div>
+                                    <div style={{ textAlign: "right" }}>
+                                        <div style={{ fontWeight: 800, color: "#10b981" }}>₹{p.sellingPrice}</div>
+                                        <div style={{ fontSize: 12, color: "#64748b", marginTop: 2, fontWeight: 600 }}>Qty: {p.quantity}</div>
                                     </div>
                                 </div>
                             ))}
@@ -266,4 +304,27 @@ const StockManager = () => {
     );
 };
 
+const labelStyle = {
+    display: "block",
+    fontSize: 12,
+    fontWeight: 700,
+    color: "#64748b",
+    marginBottom: 6,
+    textTransform: "uppercase",
+    letterSpacing: "0.5px"
+};
+
+const inputStyle = {
+    width: "100%",
+    padding: "12px 14px",
+    borderRadius: 10,
+    border: "1px solid #cbd5e1",
+    fontSize: 15,
+    outline: "none",
+    background: "#f8fafc",
+    boxSizing: "border-box",
+    transition: "border 0.2s"
+};
+
 export default StockManager;
+

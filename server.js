@@ -18,7 +18,7 @@ const db = drizzle(pool, { schema: schemas });
 app.use(cors());
 app.use(express.json());
 
-// --- New Barcode & Stock Module (Drizzle) ---
+// --- New Barcode & Stock Module (Using Existing DB) ---
 
 // 1. Scan Barcode (Check DB or OpenFoodFacts)
 app.post("/api/scan", async (req, res) => {
@@ -27,12 +27,16 @@ app.post("/api/scan", async (req, res) => {
 
   try {
     // Check local database first
-    const existing = await db.query.barcodeProducts.findFirst({
-      where: (products, { eq }) => eq(products.barcode, barcode),
-    });
+    const local = await pool.query(
+      `SELECT p.id, p.name AS "productName", p.brand, p.category, p.selling_price AS "sellingPrice", p.mrp, COALESCE(i.current_stock, 0) AS quantity
+       FROM products p
+       LEFT JOIN inventory i ON i.product_id = p.id
+       WHERE p.barcode = $1 LIMIT 1`,
+      [barcode]
+    );
 
-    if (existing) {
-      return res.json({ source: "db", product: existing });
+    if (local.rows.length > 0) {
+      return res.json({ source: "db", product: { barcode, ...local.rows[0] } });
     }
 
     // If not in DB, check OpenFoodFacts
@@ -62,95 +66,66 @@ app.post("/api/scan", async (req, res) => {
 
 // 2. Add/Update Product in Stock
 app.post("/api/add-product", async (req, res) => {
-  const { barcode, productName, brand, category, sellingPrice, mrp, quantity, gstPercent } = req.body;
-
+  const { barcode, productName, brand, category, sellingPrice, mrp, quantity } = req.body;
   try {
-    const updated = await db.insert(schemas.barcodeProducts).values({
-      barcode,
-      productName,
-      brand,
-      category,
-      sellingPrice: sellingPrice.toString(),
-      mrp: mrp ? mrp.toString() : null,
-      quantity: parseInt(quantity) || 0,
-      gstPercent: gstPercent ? gstPercent.toString() : null,
-      updatedAt: new Date(),
-    })
-      .onConflictDoUpdate({
-        target: schemas.barcodeProducts.barcode,
-        set: {
-          productName,
-          brand,
-          category,
-          sellingPrice: sellingPrice.toString(),
-          mrp: mrp ? mrp.toString() : null,
-          quantity: sql`${schemas.barcodeProducts.quantity} + ${parseInt(quantity) || 0}`,
-          gstPercent: gstPercent ? gstPercent.toString() : null,
-          updatedAt: new Date(),
-        }
-      })
-      .returning();
+    const existing = await pool.query(`SELECT id FROM products WHERE barcode = $1`, [barcode]);
+    let newStock = parseInt(quantity) || 0;
 
-    res.json({ message: "Product updated in stock", product: updated[0] });
+    if (existing.rows.length > 0) {
+      const productId = existing.rows[0].id;
+      await pool.query(
+        `UPDATE products SET name = $1, brand = $2, category = $3, selling_price = $4, mrp = $5 WHERE id = $6`,
+        [productName, brand, category, sellingPrice, mrp || null, productId]
+      );
+
+      const invCheck = await pool.query(`SELECT product_id FROM inventory WHERE product_id = $1`, [productId]);
+      if (invCheck.rows.length > 0) {
+        await pool.query(`UPDATE inventory SET current_stock = current_stock + $1, updated_at = NOW() WHERE product_id = $2`, [newStock, productId]);
+      } else {
+        await pool.query(`INSERT INTO inventory (product_id, current_stock, safety_stock, reorder_point, eoq, lead_time_days) VALUES ($1, $2, 5, 10, 50, 5)`, [productId, newStock]);
+      }
+      res.json({ message: "Product updated", product: { barcode, productName } });
+    } else {
+      const maxId = await pool.query(`SELECT id FROM products ORDER BY id DESC LIMIT 1`);
+      let nextNum = 1;
+      if (maxId.rows.length) {
+        const num = parseInt(maxId.rows[0].id.replace(/\D/g, ''));
+        if (!isNaN(num)) nextNum = num + 1;
+      }
+      const newId = `P${String(nextNum).padStart(3, '0')}`;
+      const unitCost = parseFloat(sellingPrice) * 0.7; // fallback assumption
+
+      await pool.query(
+        `INSERT INTO products(id, name, category, barcode, unit_cost, selling_price, brand, emoji, mrp)
+      VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [newId, productName, category || 'Others', barcode, unitCost, sellingPrice, brand || null, '📦', mrp ? parseFloat(mrp) : null]
+      );
+      await pool.query(`INSERT INTO inventory(product_id, current_stock, safety_stock, reorder_point, eoq, lead_time_days) VALUES($1, $2, 5, 10, 50, 5)`, [newId, newStock]);
+      res.json({ message: "Product added", product: { barcode, productName } });
+    }
   } catch (err) {
     console.error("Add product error:", err);
     res.status(500).json({ error: "Failed to update stock" });
   }
 });
 
-// 3. List all products (Barcode Module)
+// 3. List recently updated barcode products
 app.get("/api/barcode-products", async (req, res) => {
   try {
-    const all = await db.query.barcodeProducts.findMany({
-      orderBy: (products, { desc }) => [desc(products.updatedAt)],
-    });
-    res.json(all);
+    const result = await pool.query(`
+      SELECT p.id, p.name AS "productName", p.brand, p.category, p.selling_price AS "sellingPrice", p.mrp, p.barcode, COALESCE(i.current_stock, 0) AS quantity
+      FROM products p
+      LEFT JOIN inventory i ON i.product_id = p.id
+      WHERE p.barcode IS NOT NULL
+      ORDER BY i.updated_at DESC NULLS LAST
+      LIMIT 20
+    `);
+    res.json(result.rows);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch products" });
   }
 });
 
-// 4. Update Product
-app.put("/api/barcode-products/:id", async (req, res) => {
-  const { id } = req.params;
-  const { productName, brand, category, sellingPrice, mrp, quantity, gstPercent } = req.body;
-
-  try {
-    const updated = await db.update(schemas.barcodeProducts)
-      .set({
-        productName,
-        brand,
-        category,
-        sellingPrice: sellingPrice.toString(),
-        mrp: mrp ? mrp.toString() : null,
-        quantity: parseInt(quantity) || 0,
-        gstPercent: gstPercent ? gstPercent.toString() : null,
-        updatedAt: new Date(),
-      })
-      .where(sql`${schemas.barcodeProducts.id} = ${id}`)
-      .returning();
-
-    if (updated.length === 0) return res.status(404).json({ error: "Product not found" });
-    res.json(updated[0]);
-  } catch (err) {
-    res.status(500).json({ error: "Failed to update product" });
-  }
-});
-
-// 5. Delete Product
-app.delete("/api/barcode-products/:id", async (req, res) => {
-  const { id } = req.params;
-  try {
-    const deleted = await db.delete(schemas.barcodeProducts)
-      .where(sql`${schemas.barcodeProducts.id} = ${id}`)
-      .returning();
-
-    if (deleted.length === 0) return res.status(404).json({ error: "Product not found" });
-    res.json({ message: "Product deleted" });
-  } catch (err) {
-    res.status(500).json({ error: "Failed to delete product" });
-  }
-});
 
 // Existing DB initialization (already handles pool)
 pool.connect()
@@ -160,7 +135,7 @@ pool.connect()
     await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS barcode VARCHAR(50)`);
     await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS brand VARCHAR(100)`);
     await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS emoji VARCHAR(10)`);
-    await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS mrp NUMERIC(10,2)`);
+    await pool.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS mrp NUMERIC(10, 2)`);
     console.log("✅ All columns ready (barcode, brand, emoji, mrp)");
   })
   .catch(err => { console.error("❌ DB connection failed:", err.message); process.exit(1); });
@@ -170,14 +145,14 @@ app.get("/api/summary", async (req, res) => {
   try {
     const [statusRes, savingsRes, accuracyRes, stockRes] = await Promise.all([
       pool.query(`
-        SELECT
-          COUNT(*) FILTER (WHERE i.current_stock <= i.safety_stock)                        AS critical,
-          COUNT(*) FILTER (WHERE i.current_stock > i.safety_stock AND i.current_stock <= i.reorder_point) AS low,
-          COUNT(*) FILTER (WHERE i.current_stock > i.eoq * 2)                              AS overstock,
-          COUNT(*) FILTER (WHERE i.current_stock > i.reorder_point AND i.current_stock <= i.eoq * 2) AS optimal,
-          COUNT(*)                                                                          AS total
+      SELECT
+      COUNT(*) FILTER(WHERE i.current_stock <= i.safety_stock)                        AS critical,
+        COUNT(*) FILTER(WHERE i.current_stock > i.safety_stock AND i.current_stock <= i.reorder_point) AS low,
+          COUNT(*) FILTER(WHERE i.current_stock > i.eoq * 2)                              AS overstock,
+            COUNT(*) FILTER(WHERE i.current_stock > i.reorder_point AND i.current_stock <= i.eoq * 2) AS optimal,
+              COUNT(*)                                                                          AS total
         FROM inventory i`),
-      pool.query(`SELECT COALESCE(SUM(potential_savings),0) AS total_savings FROM alerts WHERE resolved = FALSE`),
+      pool.query(`SELECT COALESCE(SUM(potential_savings), 0) AS total_savings FROM alerts WHERE resolved = FALSE`),
       pool.query(`SELECT 90.2 AS accuracy`),  // would come from model evaluation table in prod
       pool.query(`SELECT SUM(i.current_stock * p.unit_cost) AS total_stock_value FROM inventory i JOIN products p ON p.id = i.product_id`),
     ]);
@@ -212,17 +187,17 @@ app.get("/api/products", async (req, res) => {
 
     const result = await pool.query(`
       SELECT
-        p.id, p.name, p.category, p.unit_cost, p.selling_price, p.barcode, p.brand, p.emoji, p.mrp,
+      p.id, p.name, p.category, p.unit_cost, p.selling_price, p.barcode, p.brand, p.emoji, p.mrp,
         COALESCE(i.current_stock, 0) AS current_stock,
-        COALESCE(i.safety_stock, 0) AS safety_stock,
-        COALESCE(i.reorder_point, 0) AS reorder_point,
-        COALESCE(i.eoq, 0) AS eoq,
-        COALESCE(i.lead_time_days, 5) AS lead_time_days,
-        ROUND(COALESCE(i.current_stock, 0)::numeric / NULLIF(
-          (SELECT AVG(s.units_sold) FROM sales_history s WHERE s.product_id = p.id AND s.sale_date >= CURRENT_DATE - 30),
-          0), 1) AS days_of_stock,
-        (SELECT ROUND(AVG(s.units_sold),1) FROM sales_history s WHERE s.product_id = p.id AND s.sale_date >= CURRENT_DATE - 30) AS avg_daily,
-        CASE
+          COALESCE(i.safety_stock, 0) AS safety_stock,
+            COALESCE(i.reorder_point, 0) AS reorder_point,
+              COALESCE(i.eoq, 0) AS eoq,
+                COALESCE(i.lead_time_days, 5) AS lead_time_days,
+                  ROUND(COALESCE(i.current_stock, 0):: numeric / NULLIF(
+                    (SELECT AVG(s.units_sold) FROM sales_history s WHERE s.product_id = p.id AND s.sale_date >= CURRENT_DATE - 30),
+                    0), 1) AS days_of_stock,
+                      (SELECT ROUND(AVG(s.units_sold), 1) FROM sales_history s WHERE s.product_id = p.id AND s.sale_date >= CURRENT_DATE - 30) AS avg_daily,
+                        CASE
           WHEN i.current_stock IS NULL THEN 'OPTIMAL'
           WHEN i.current_stock <= i.safety_stock THEN 'CRITICAL'
           WHEN i.current_stock <= i.reorder_point THEN 'LOW'
@@ -248,7 +223,7 @@ app.get("/api/products/search", async (req, res) => {
        WHERE LOWER(p.name) LIKE $1 OR LOWER(p.brand) LIKE $1
        ORDER BY p.name
        LIMIT 10`,
-      [`%${q.toLowerCase()}%`]
+      [`% ${q.toLowerCase()}% `]
     );
     res.json(result.rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -274,15 +249,15 @@ app.get("/api/products/:id", async (req, res) => {
   try {
     const [product, history, forecast] = await Promise.all([
       pool.query(`
-        SELECT p.*, i.*, 
-          CASE WHEN i.current_stock <= i.safety_stock THEN 'CRITICAL'
+        SELECT p.*, i.*,
+  CASE WHEN i.current_stock <= i.safety_stock THEN 'CRITICAL'
                WHEN i.current_stock <= i.reorder_point THEN 'LOW'
                WHEN i.current_stock > i.eoq * 2 THEN 'OVERSTOCK'
                ELSE 'OPTIMAL' END AS status,
-          ROUND(i.current_stock::numeric / NULLIF((SELECT AVG(units_sold) FROM sales_history WHERE product_id=$1 AND sale_date >= CURRENT_DATE-30),0),1) AS days_of_stock
-        FROM products p JOIN inventory i ON i.product_id=p.id WHERE p.id=$1`, [req.params.id]),
-      pool.query(`SELECT sale_date, units_sold, revenue FROM sales_history WHERE product_id=$1 ORDER BY sale_date DESC LIMIT 30`, [req.params.id]),
-      pool.query(`SELECT forecast_date, predicted_units, lower_bound, upper_bound FROM forecasts WHERE product_id=$1 AND forecast_date >= CURRENT_DATE ORDER BY forecast_date`, [req.params.id]),
+  ROUND(i.current_stock:: numeric / NULLIF((SELECT AVG(units_sold) FROM sales_history WHERE product_id = $1 AND sale_date >= CURRENT_DATE - 30), 0), 1) AS days_of_stock
+        FROM products p JOIN inventory i ON i.product_id = p.id WHERE p.id = $1`, [req.params.id]),
+      pool.query(`SELECT sale_date, units_sold, revenue FROM sales_history WHERE product_id = $1 ORDER BY sale_date DESC LIMIT 30`, [req.params.id]),
+      pool.query(`SELECT forecast_date, predicted_units, lower_bound, upper_bound FROM forecasts WHERE product_id = $1 AND forecast_date >= CURRENT_DATE ORDER BY forecast_date`, [req.params.id]),
     ]);
     if (!product.rows.length) return res.status(404).json({ error: "Product not found" });
     res.json({ ...product.rows[0], history: history.rows, forecast: forecast.rows });
@@ -294,9 +269,9 @@ app.get("/api/alerts", async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT a.*, p.name AS product_name, p.category, i.current_stock,
-             i.reorder_point, i.safety_stock, i.eoq, i.lead_time_days,
-             ROUND(i.current_stock::numeric / NULLIF(
-               (SELECT AVG(units_sold) FROM sales_history s WHERE s.product_id=p.id AND s.sale_date>=CURRENT_DATE-30),0),1) AS days_of_stock
+  i.reorder_point, i.safety_stock, i.eoq, i.lead_time_days,
+  ROUND(i.current_stock:: numeric / NULLIF(
+    (SELECT AVG(units_sold) FROM sales_history s WHERE s.product_id = p.id AND s.sale_date >= CURRENT_DATE - 30), 0), 1) AS days_of_stock
       FROM alerts a
       JOIN products p ON p.id = a.product_id
       JOIN inventory i ON i.product_id = p.id
@@ -311,8 +286,8 @@ app.get("/api/history", async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT sale_date AS date,
-             SUM(units_sold) AS total_units,
-             SUM(revenue) AS total_revenue
+  SUM(units_sold) AS total_units,
+    SUM(revenue) AS total_revenue
       FROM sales_history
       WHERE sale_date >= CURRENT_DATE - 30
       GROUP BY sale_date
@@ -326,7 +301,7 @@ app.get("/api/forecast", async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT f.forecast_date, f.predicted_units, f.lower_bound, f.upper_bound,
-             p.id AS product_id, p.name AS product_name, p.category
+  p.id AS product_id, p.name AS product_name, p.category
       FROM forecasts f
       JOIN products p ON p.id = f.product_id
       WHERE f.forecast_date >= CURRENT_DATE
@@ -340,9 +315,9 @@ app.get("/api/categories", async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT p.category,
-             COUNT(*) AS product_count,
-             SUM(i.current_stock * p.unit_cost) AS stock_value,
-             COUNT(*) FILTER (WHERE i.current_stock <= i.safety_stock) AS critical_count
+  COUNT(*) AS product_count,
+    SUM(i.current_stock * p.unit_cost) AS stock_value,
+      COUNT(*) FILTER(WHERE i.current_stock <= i.safety_stock) AS critical_count
       FROM products p JOIN inventory i ON i.product_id = p.id
       GROUP BY p.category ORDER BY stock_value DESC`);
     res.json(result.rows);
@@ -374,12 +349,12 @@ app.post("/api/products", async (req, res) => {
       const num = parseInt(maxId.rows[0].id.replace(/\D/g, ''));
       nextNum = num + 1;
     }
-    const newId = `P${String(nextNum).padStart(3, '0')}`;
+    const newId = `P${String(nextNum).padStart(3, '0')} `;
 
     // Insert product
     await pool.query(
-      `INSERT INTO products (id, name, category, barcode, unit_cost, selling_price, brand, emoji, mrp)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+      `INSERT INTO products(id, name, category, barcode, unit_cost, selling_price, brand, emoji, mrp)
+VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
       [newId, name, category, barcode || null, parseFloat(unit_cost), parseFloat(selling_price), brand || null, emoji || '📦', mrp ? parseFloat(mrp) : null]
     );
 
@@ -391,8 +366,8 @@ app.post("/api/products", async (req, res) => {
     const leadTime = 5;
 
     await pool.query(
-      `INSERT INTO inventory (product_id, current_stock, safety_stock, reorder_point, eoq, lead_time_days)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
+      `INSERT INTO inventory(product_id, current_stock, safety_stock, reorder_point, eoq, lead_time_days)
+VALUES($1, $2, $3, $4, $5, $6)`,
       [newId, stock, safety, reorder, eoq, leadTime]
     );
 
