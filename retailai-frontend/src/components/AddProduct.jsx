@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import Scanner from "./Scanner";
+import { apiUrl } from "../api";
 
 const CATEGORIES = ["Staples", "Cooking", "Dairy", "Snacks", "Instant Food", "Household", "Personal Care", "Beverages", "Other"];
 
@@ -44,7 +45,7 @@ export default function AddProduct({ onClose, t, products, onAdded, vibrate }) {
         setStep("lookup");
         try {
             // 1. Check backend DB by barcode
-            const dbRes = await fetch(`/api/products/barcode/${code}`);
+            const dbRes = await fetch(apiUrl(`/api/products/barcode/${code}`));
             const dbData = await dbRes.json();
             if (dbData.found) {
                 const p = dbData.product;
@@ -111,7 +112,7 @@ export default function AddProduct({ onClose, t, products, onAdded, vibrate }) {
             return;
         }
         try {
-            const res = await fetch(`/api/products/search?q=${encodeURIComponent(term)}`);
+            const res = await fetch(apiUrl(`/api/products/search?q=${encodeURIComponent(term)}`));
             const data = await res.json();
             setSearchResults(data.slice(0, 8));
         } catch (e) {
@@ -169,7 +170,7 @@ export default function AddProduct({ onClose, t, products, onAdded, vibrate }) {
 
     const saveProductToAPI = async (product) => {
         try {
-            const res = await fetch('/api/products', {
+            const res = await fetch(apiUrl('/api/products'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -207,7 +208,7 @@ export default function AddProduct({ onClose, t, products, onAdded, vibrate }) {
     const handleRestock = async (qty) => {
         setLoading(true);
         try {
-            const res = await fetch(`/api/inventory/${productInfo.id}/restock`, {
+            const res = await fetch(apiUrl(`/api/inventory/${productInfo.id}/restock`), {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ quantity: qty })
@@ -406,7 +407,7 @@ export default function AddProduct({ onClose, t, products, onAdded, vibrate }) {
                                 // If the product already exists in DB (has an id), just restock
                                 if (productInfo.id) {
                                     try {
-                                        await fetch(`/api/inventory/${productInfo.id}/restock`, {
+                                        await fetch(apiUrl(`/api/inventory/${productInfo.id}/restock`), {
                                             method: 'PATCH',
                                             headers: { 'Content-Type': 'application/json' },
                                             body: JSON.stringify({ quantity: confirmStock })

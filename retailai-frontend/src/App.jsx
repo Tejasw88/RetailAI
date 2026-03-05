@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, createContext, useContext } from "react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, LineChart, Line, PieChart, Pie } from "recharts";
 import { translations, RTL_LANGUAGES, LANGUAGE_LIST } from "./translations";
+import { apiUrl } from "./api";
 import AddProduct from "./components/AddProduct";
 
 // ── LANGUAGE CONTEXT ──────────────────────────────────────────
@@ -23,7 +24,7 @@ const getCategoryEmoji = (cat) => {
 // Fetch products from API, fallback to localStorage cache
 async function fetchProductsFromAPI() {
   try {
-    const res = await fetch('/api/products');
+    const res = await fetch(apiUrl('/api/products'));
     if (!res.ok) throw new Error('API error');
     const data = await res.json();
     // Normalize: ensure emoji, avg_daily exist
